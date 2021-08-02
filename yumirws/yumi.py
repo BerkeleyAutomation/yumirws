@@ -13,8 +13,8 @@ from abb_librws import (
 )
 import numpy as np
 from autolab_core import RigidTransform
-from .constants import M_TO_MM, SPEEDDATA_CONSTANTS, ZONEDATA_CONSTANTS, MM_TO_M, WAYPOINTS
-
+from yumirws.constants import M_TO_MM, SPEEDDATA_CONSTANTS, ZONEDATA_CONSTANTS, MM_TO_M, WAYPOINTS
+import time
 """
 desired new capabilities: 
 moveL with relative command (check old interface for implementation)
@@ -102,6 +102,10 @@ class YuMi(object):
     def left_gripper_open(self):
         self.iface.services().sg().left_grip_out()
 
+    def left_gripper_move(self,dist):
+        dist *= M_TO_MM
+        self.iface.services().sg().left_move_to(dist)
+
     def left_gripper_close(self):
         self.iface.services().sg().left_grip_in()
 
@@ -113,6 +117,10 @@ class YuMi(object):
 
     def right_gripper_open(self):
         self.iface.services().sg().right_grip_out()
+
+    def right_gripper_move(self,dist):
+        dist *= M_TO_MM
+        self.iface.services().sg().right_move_to(dist)
 
     def right_gripper_close(self):
         self.iface.services().sg().right_grip_in()
@@ -131,6 +139,7 @@ class YuMi(object):
 
     def reset_program_pointer(self):
         self.iface.reset_program_pointer()
+
     def set_tcp(self,left_tcp,right_tcp):
         self.left.set_tcp(left_tcp)
         self.right.set_tcp(right_tcp)
@@ -149,11 +158,12 @@ class YuMiArm(object):
         self.set_tcp(tcp)
 
     def set_tcp(self,tcp):
+        if tcp is None:tcp=RigidTransform()
         self.tcp=tcp
 
     def get_joints(self):
         jt = self.iface.mechanical_unit_joint_target(self.task[2:])
-        return np.array(
+        return np.deg2rad(np.array(
             [
                 jt.robax.rax_1.value,
                 jt.robax.rax_2.value,
@@ -163,27 +173,17 @@ class YuMiArm(object):
                 jt.robax.rax_5.value,
                 jt.robax.rax_6.value,
             ]
-        )
+        ))
 
-    def move_joints(self, joints, speed=None):
-        if joints.shape != (7,):
-            raise ValueError("Joints shape is not (7,)")
-        if speed is not None:
-            sd = SpeedData(speed)
-            self.iface.services().rapid().set_move_speed(self.task, sd)
-            self._wait_for_cmd()
-        jt = JointTarget(RobJoint(np.append(joints[:2], joints[3:])), ExtJoint(joints[2]))
-        self.iface.services().rapid().run_move_abs_j(self.task, jt)
-        self._wait_for_cmd()
-
-    def move_joints_traj(self, joints, speed="v100", zone="z1",final_zone='fine'):
+    def move_joints_traj(self, joints, speed=(300,360), zone="z1",final_zone='fine'):
+        joints=np.rad2deg(np.array(joints))
         if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
             speed = np.repeat(speed, len(joints))
         elif isinstance(speed, (np.ndarray, list, tuple)):
-            speed = np.broadcast_to(speed, (len(joints), 4))
+            speed = np.broadcast_to(speed, (len(joints), 2))
         else:
             raise ValueError(
-                "Speed must either be a single string or a (4,) or (n,4) iterable"
+                "Speed must either be a single string or a (2,) or (2,4) iterable"
             )
         if isinstance(zone, str) and zone in ZONEDATA_CONSTANTS:
             zone = np.repeat(zone, len(joints))
@@ -199,13 +199,13 @@ class YuMiArm(object):
         toolstr = f"PERS tooldata custom_tool := {self.tool_str};" 
         for wp, sd, zd in zip(joints[:-1], speed[:-1], zone[:-1]):
             jt = JointTarget(RobJoint(np.append(wp[:2], wp[3:])), ExtJoint(eax_a=wp[2]))
-            sd = sd if isinstance(sd, str) else SpeedData(sd)
+            sd = sd if isinstance(sd, str) else SpeedData((sd[0],sd[1],5000,5000))
             zd = zd if isinstance(zd, str) else ZoneData(zd)
             wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {zd}, custom_tool;\n"
         jt = JointTarget(
                 RobJoint(np.append(joints[-1, :2], joints[-1, 3:])), ExtJoint(eax_a=joints[-1, 2])
         )
-        sd = speed[-1] if isinstance(speed[-1], str) else SpeedData(speed[-1])
+        sd = speed[-1] if isinstance(speed[-1], str) else SpeedData((speed[-1][0],speed[-1][1],5000,5000))
         wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {final_zone}, tool0;"
         routine = f"MODULE customModule\n\t{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
@@ -239,15 +239,16 @@ class YuMiArm(object):
                     from_frame=self.tcp.to_frame,to_frame="base_link")
         return wrist*self.tcp
     
-    def goto_pose(self,pose,speed=(150,360),zone='fine'):
+    def goto_pose(self,pose,speed=(300,360),zone='fine',linear=True):
         rt = self.iface.mechanical_unit_rob_target(self.task[2:],Coordinate.BASE,"tool0","wobj0")
         trans=pose.translation*M_TO_MM
         rt.pos=Pos(trans)
         rt.orient=Orient(*pose.quaternion)
-        toolstr = f"PERS tooldata custom_tool := {self.tool_str};\n\tVAR robtarget p1 := {rt};" 
+        toolstr = f"\n\tPERS tooldata custom_tool := {self.tool_str};\n\tVAR robtarget p1 := {rt};" 
         sd = speed if isinstance(speed, str) else SpeedData((speed[0],speed[1],2000,2000))
-        wpstr = f"\t\tMoveL p1, {sd}, {zone}, custom_tool;"
-        routine = f"MODULE customModule\n\t{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
+        cmd= "MoveL" if linear else "MoveJ"
+        wpstr = f"\t\t{cmd} p1, {sd}, {zone}, custom_tool;"
+        routine = f"MODULE customModule{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
 
     def _execute_custom(self, routine):
@@ -260,11 +261,14 @@ class YuMiArm(object):
         except RuntimeError:
             pass
         self._wait_for_cmd()
+        time.sleep(.01)
         self.iface.upload_file(self._temp_mod, routine)
         self._wait_for_cmd()
+        time.sleep(.01)
         self.iface.services().rapid().run_module_load(
             self.task, self._temp_mod_path
         )
+        time.sleep(.01)
         self.iface.services().rapid().run_call_by_var(self.task, "custom_routine", 0)
         self._wait_for_cmd()
 
@@ -282,8 +286,11 @@ if __name__ == "__main__":
     for w in WAYPOINTS:
         new_waypoints.append(YK.yumi_order_2_urdf(w))
     y.left_gripper_close()
-    y.left.goto_pose(RigidTransform(translation=[ 0.27877562,  0.00155846, -0.00213494],rotation = GRIP_DOWN_R, from_frame="l_tcp"),zone='fine',speed=(100,360))
-    #y.left.goto_pose(RigidTransform(translation=[.4,-.1,.1],rotation = GRIP_DOWN_R, from_frame="l_tcp"),speed=(500,360))
+    y.left.move_joints_traj([np.rad2deg(YK.L_NICE_STATE)])
+    y.left.goto_pose(RigidTransform(translation=[ 0.4,.1, 0.1],rotation = GRIP_DOWN_R, from_frame="l_tcp"),
+        zone='fine',speed=(100,360),linear=True)
+    y.left.goto_pose(RigidTransform(translation=[.4,-.1,.1],rotation = GRIP_DOWN_R, from_frame="l_tcp"),
+        speed=(500,360))
     #y.left.move_joints_traj(np.array(new_waypoints),(500,180,2000,2000))
     '''
     p=y.right.read_test_pose(np.zeros(7))
