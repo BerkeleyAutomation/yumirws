@@ -5,16 +5,16 @@ Author: Mike Danielczuk
 import os
 from setuptools import setup, find_packages
 
+root_dir = os.path.dirname(os.path.realpath(__file__))
+
 requirements = [
     "numpy",
     "autolab-core",
-#     "abb_librws", TODO: add pip package for this lib
+    f"abb_librws @ file://localhost{root_dir}/extern/abb_librws",
 ]
 
 # load __version__ without importing anything
-version_file = os.path.join(
-    os.path.dirname(__file__), "yumirws/version.py"
-)
+version_file = os.path.join(os.path.dirname(__file__), "yumirws/version.py")
 with open(version_file, "r") as f:
     # use eval to get a clean string of version from file
     __version__ = eval(f.read().strip().split("=")[-1])
@@ -31,7 +31,7 @@ setup(
     description="YuMi Robot Web Services (RWS) wrapper for abb_librws library",
     long_description=long_description,
     author="Mike Danielczuk/Justin Kerr",
-    author_email="mdanielczuk@berkeley.edu, jkerr@berkeley.edu",
+    author_email="mdanielczuk@berkeley.edu/jkerr@berkeley.edu",
     license="MIT Software License",
     url="https://github.com/BerkeleyAutomation/yumirws",
     keywords="robotics grasping",
