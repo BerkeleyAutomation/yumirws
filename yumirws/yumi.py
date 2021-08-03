@@ -128,6 +128,14 @@ class YuMiArm(object):
             print(f"Failed to initialize {self._side} gripper!")
 
     @property
+    def tcp(self):
+        return self._tcp
+    
+    @tcp.setter
+    def tcp(self, value):
+        self._tcp = value
+
+    @property
     def tool_str(self):
         """
         returns the tooltip string for the current TCP
@@ -211,7 +219,7 @@ class YuMiArm(object):
             wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {zd}, curtool;\n"
         jt = abb.JointTarget(
             abb.RobJoint(np.append(joints[-1, :2], joints[-1, 3:])),
-            abb.xtJoint(eax_a=joints[-1, 2]),
+            abb.ExtJoint(eax_a=joints[-1, 2]),
         )
         sd = (
             speed[-1]
