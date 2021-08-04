@@ -109,7 +109,21 @@ class YuMi(object):
     def reset_program_pointer(self):
         self._iface.reset_program_pointer()
 
+    def calibrate_grippers(self):
+        self._gripper_fn("calibrate")()
+        time.sleep(2)
 
+    def move_grippers(self,lpos,rpos):
+        self._gripper_fn("move_to")(lpos*M_TO_MM,rpos*M_TO_MM)
+
+    def close_grippers(self):
+        self._gripper_fn("grip_in")()
+
+    def open_grippers(self):
+        self._gripper_fn("grip_out")()
+
+    def _gripper_fn(self, fn_name):
+        return getattr(self._iface.services().sg(), f"dual_{fn_name}")
 class YuMiArm(mp.Process):
     def __init__(self, lock, ip_address, task, tcp=RigidTransform()):
         super().__init__()
@@ -136,6 +150,7 @@ class YuMiArm(mp.Process):
             time.sleep(.001)
             self.q_dec()
             self._wait_for_cmd()
+
     def sync(self):
         '''
         blocks until queue is empty and current cmd is done
@@ -205,21 +220,24 @@ class YuMiArm(mp.Process):
         self._input_queue.put(("_open_gripper",))
     
     def _open_gripper(self):
-        self._gripper_fn("grip_out")()
+        with self._lock:
+            self._gripper_fn("grip_out")()
 
     def close_gripper(self):
         self.q_add()
         self._input_queue.put(("_close_gripper",))
     
     def _close_gripper(self):
-        self._gripper_fn("grip_in")()
+        with self._lock:
+            self._gripper_fn("grip_in")()
 
     def move_gripper(self, value):
         self.q_add()
         self._input_queue.put(("_move_gripper", value))
     
     def _move_gripper(self, value):
-        self._gripper_fn("move_to")(M_TO_MM * value)
+        with self._lock:
+            self._gripper_fn("move_to")(M_TO_MM * value)
 
     @property
     def gripper_settings(self):

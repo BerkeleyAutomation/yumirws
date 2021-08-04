@@ -14,8 +14,12 @@ for w in WAYPOINTS:
     w_r[3] *= -1
     w_r[6] *= -1
     new_waypoints_r.append(np.deg2rad(YK.yumi_order_2_urdf(w_r)))
+y.left.open_gripper()
+y.right.open_gripper()
 y.left.move_joints_traj(np.array(new_waypoints))
 y.right.move_joints_traj(np.array(new_waypoints_r))
+y.right.close_gripper()
+y.left.close_gripper()
 y.left.sync()
 y.right.sync()
 print("ending")
