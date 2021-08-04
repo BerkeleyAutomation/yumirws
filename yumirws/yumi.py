@@ -6,19 +6,12 @@ import time
 import abb_librws as abb
 from autolab_core import RigidTransform
 
-from yumirws.constants import (
+from .constants import (
     M_TO_MM,
+    MM_TO_M,
     SPEEDDATA_CONSTANTS,
     ZONEDATA_CONSTANTS,
-    MM_TO_M,
-    WAYPOINTS,
 )
-
-"""
-desired new capabilities: 
-moveL with relative command (check old interface for implementation)
-get pose from the yumi FK
-"""
 
 
 class YuMi(object):
@@ -33,10 +26,11 @@ class YuMi(object):
         except RuntimeError:
             print("YuMi could not connect!")
         r_task, l_task = self._iface.rapid_tasks
-        self.left = YuMiArm(ip_address, l_task.name, l_tcp)
+        self.lock=mp.Lock()
+        self.left = YuMiArm(self.lock,ip_address, l_task.name, l_tcp)
         self.left.daemon = True
         self.left.start()
-        self.right = YuMiArm(ip_address, r_task.name, r_tcp)
+        self.right = YuMiArm(self.lock,ip_address, r_task.name, r_tcp)
         self.right.daemon = True
         self.right.start()
 
@@ -117,9 +111,10 @@ class YuMi(object):
 
 
 class YuMiArm(mp.Process):
-    def __init__(self, ip_address, task, tcp=RigidTransform()):
+    def __init__(self, lock, ip_address, task, tcp=RigidTransform()):
         super().__init__()
         self._input_queue = mp.Queue()
+        self._q_len = mp.Value('i',0)#we need this to be a reliable counter for the q size
         self._iface = abb.RWSStateMachineInterface(ip_address)
         self._task = task
         self._tcp = tcp
@@ -127,17 +122,39 @@ class YuMiArm(mp.Process):
         self._side = "left" if self._task.lower()[-1] == "l" else "right"
         self._custom_mod = abb.FileResource(f"custom_{self._task.lower()}.sys")
         self._custom_mod_path = f"HOME:/{self._custom_mod.filename}"
+        self._lock = lock
 
     def run(self):
         while True:
             try:
                 request = self._input_queue.get(timeout=1)
+                
             except Queue.Empty:
                 continue
-            print(request)
+            print(self._side,"executing command:",request[0])
             getattr(self, request[0])(*request[1:])
-            time.sleep(.01)
+            time.sleep(.001)
+            self.q_dec()
             self._wait_for_cmd()
+    def sync(self):
+        '''
+        blocks until queue is empty and current cmd is done
+        queue empty() is not reliable when querying queue items,
+        so instead we share a mp.Value which atomically gets updated when adding and
+        removing items from the queue
+        '''
+        while self._q_len.value>0:
+            time.sleep(.001)
+        self._wait_for_cmd()
+
+    def q_add(self):
+        with self._q_len.get_lock():
+            self._q_len.value += 1
+
+    def q_dec(self):
+        with self._q_len.get_lock():
+            self._q_len.value -= 1
+
     @property
     def tcp(self):
         return self._tcp
@@ -170,30 +187,38 @@ class YuMiArm(mp.Process):
         )
 
     def calibrate_gripper(self):
+        self.q_add()
         self._input_queue.put(("_calibrate_gripper",))
         
     def _calibrate_gripper(self):
         self._gripper_fn("calibrate")()
 
     def initialize_gripper(self):
+        self.q_add()
         self._input_queue.put(("_initialize_gripper",))
 
     def _initialize_gripper(self):
         self._gripper_fn("initialize")()
 
     def open_gripper(self):
+        self.q_add()
         self._input_queue.put(("_open_gripper",))
     
     def _open_gripper(self):
         self._gripper_fn("grip_out")()
 
     def close_gripper(self):
+        self.q_add()
         self._input_queue.put(("_close_gripper",))
     
     def _close_gripper(self):
         self._gripper_fn("grip_in")()
 
     def move_gripper(self, value):
+        self.q_add()
+        self._input_queue.put(("_move_gripper", value))
+    
+    def _move_gripper(self, value):
         self._gripper_fn("move_to")(M_TO_MM * value)
 
     @property
@@ -205,6 +230,7 @@ class YuMiArm(mp.Process):
         self._gripper_fn("set_settings")(value)
 
     def move_joints_traj(self, joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
+        self.q_add()
         self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
 
     def _move_joints_traj(
@@ -311,7 +337,11 @@ class YuMiArm(mp.Process):
         )
         return wrist * self._tcp
 
-    def goto_pose(self, pose, speed=(.3, 2*np.pi), zone="fine", linear=True):
+    def goto_pose(self,pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
+        self.q_add()
+        self._input_queue.put(("_goto_pose",pose,speed,zone,linear))
+        
+    def _goto_pose(self, pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
         rt = self._iface.mechanical_unit_rob_target(
             self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"
         )
@@ -322,7 +352,7 @@ class YuMiArm(mp.Process):
         sd = (
             speed
             if isinstance(speed, str)
-            else abb.SpeedData((speed[0]*M_TO_MM, np.rad2deg(speed[1]), 2000, 2000))
+            else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
         )
         cmd = "MoveL" if linear else "MoveJ"
         wpstr = f"\t\t{cmd} p1, {sd}, {zone}, custom_tool;"
@@ -334,83 +364,28 @@ class YuMiArm(mp.Process):
 
     def _execute_custom(self, routine):
         self._wait_for_cmd()
-        # Upload and execute custom routine (unloading needed for new routine)
-        self._iface.services().rapid().run_module_unload(
-            self._task, self._custom_mod_path
-        )
-        time.sleep(0.01)
-        self._wait_for_cmd()
-        self._iface.upload_file(self._custom_mod, routine)
-        time.sleep(0.01)
-        self._wait_for_cmd()
-        self._iface.services().rapid().run_module_load(
-            self._task, self._custom_mod_path
-        )
-        time.sleep(0.01)
-        self._wait_for_cmd()
-        self._iface.services().rapid().run_call_by_var(
-            self._task, "custom_routine", 0
-        )
+        with self._lock:
+            # Upload and execute custom routine (unloading needed for new routine)
+            self._iface.services().rapid().run_module_unload(
+                self._task, self._custom_mod_path
+            )
+            time.sleep(0.01)
+            self._wait_for_cmd()
+            self._iface.upload_file(self._custom_mod, routine)
+            time.sleep(0.01)
+            self._wait_for_cmd()
+            self._iface.services().rapid().run_module_load(
+                self._task, self._custom_mod_path
+            )
+            time.sleep(0.01)
+            self._wait_for_cmd()
+            self._iface.services().rapid().run_call_by_var(
+                self._task, "custom_routine", 0
+            )
         time.sleep(0.01)
         self._wait_for_cmd()
 
     def _wait_for_cmd(self):
-        while not self._iface.services().main().is_idle(self._task):
+        while (not self._iface.services().main().is_idle(self._task)
+            and not self._iface.services().main().is_stationary(self._task[2:])):
             pass
-
-
-if __name__ == "__main__":
-    y = YuMi()
-    # y.left.initialize_gripper()
-    # y.left.close_gripper()
-    # # y.left.calibrate_gripper()
-    # for _ in range(5):
-    #     y.left.open_gripper()
-    #     y.left.close_gripper()
-    # time.sleep(10)
-
-    from yumiplanning.yumi_kinematics import YuMiKinematics as YK
-
-    L_TCP = RigidTransform(
-        translation=[0, 0, 0.11], from_frame="l_tcp", to_frame="wrist"
-    )
-    GRIP_DOWN_R = np.diag(
-        [1, -1, -1]
-    )  # orientation where the gripper is facing downwards
-    y = YuMi()
-    new_waypoints = []
-    for w in WAYPOINTS:
-        new_waypoints.append(YK.yumi_order_2_urdf(w))
-    y.left.move_joints_traj([YK.L_NICE_STATE])
-    time.sleep(5)
-    # y.left.goto_pose(
-    #     RigidTransform(
-    #         translation=[0.4, 0.1, 0.1],
-    #         rotation=GRIP_DOWN_R,
-    #         from_frame="l_tcp",
-    #     ),
-    #     zone="fine",
-    #     speed=(100, 360),
-    #     linear=True,
-    # )
-    # y.left.goto_pose(
-    #     RigidTransform(
-    #         translation=[0.4, -0.1, 0.1],
-    #         rotation=GRIP_DOWN_R,
-    #         from_frame="l_tcp",
-    #     ),
-    #     speed=(500, 360),
-    # )
-    # y.left.move_joints_traj(np.array(new_waypoints[:20]),(500,180,2000,2000))
-    """
-    p=y.right.read_test_pose(np.zeros(7))
-    print(f"zero pos",p)
-    for j in range(7):
-        for diff in [-10,10]:
-            js=np.zeros(7)
-            js[j]=diff
-            p=y.right.read_test_pose(js)
-            print(f"joint {j} at {diff} deg",p)
-    """
-
-
