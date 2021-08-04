@@ -135,9 +135,9 @@ class YuMiArm(mp.Process):
             except Queue.Empty:
                 continue
             print(request)
-            getattr(self, request)()
+            getattr(self, request[0])(*request[1:])
+            time.sleep(.01)
             self._wait_for_cmd()
-
     @property
     def tcp(self):
         return self._tcp
@@ -170,25 +170,25 @@ class YuMiArm(mp.Process):
         )
 
     def calibrate_gripper(self):
-        self._input_queue.put(("_calibrate_gripper"))
+        self._input_queue.put(("_calibrate_gripper",))
         
     def _calibrate_gripper(self):
         self._gripper_fn("calibrate")()
 
     def initialize_gripper(self):
-        self._input_queue.put(("_initialize_gripper"))
+        self._input_queue.put(("_initialize_gripper",))
 
     def _initialize_gripper(self):
         self._gripper_fn("initialize")()
 
     def open_gripper(self):
-        self._input_queue.put(("_open_gripper"))
+        self._input_queue.put(("_open_gripper",))
     
     def _open_gripper(self):
         self._gripper_fn("grip_out")()
 
     def close_gripper(self):
-        self._input_queue.put(("_close_gripper"))
+        self._input_queue.put(("_close_gripper",))
     
     def _close_gripper(self):
         self._gripper_fn("grip_in")()
@@ -205,7 +205,7 @@ class YuMiArm(mp.Process):
         self._gripper_fn("set_settings")(value)
 
     def move_joints_traj(self, joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
-        self.input_queue.put(("move_joints_traj", joints, speed, zone, final_zone))
+        self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
 
     def _move_joints_traj(
         self, joints, speed, zone, final_zone
@@ -311,7 +311,7 @@ class YuMiArm(mp.Process):
         )
         return wrist * self._tcp
 
-    def goto_pose(self, pose, speed=(300, 360), zone="fine", linear=True):
+    def goto_pose(self, pose, speed=(.3, 2*np.pi), zone="fine", linear=True):
         rt = self._iface.mechanical_unit_rob_target(
             self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"
         )
@@ -322,7 +322,7 @@ class YuMiArm(mp.Process):
         sd = (
             speed
             if isinstance(speed, str)
-            else abb.SpeedData((speed[0], speed[1], 2000, 2000))
+            else abb.SpeedData((speed[0]*M_TO_MM, np.rad2deg(speed[1]), 2000, 2000))
         )
         cmd = "MoveL" if linear else "MoveJ"
         wpstr = f"\t\t{cmd} p1, {sd}, {zone}, custom_tool;"
@@ -333,20 +333,25 @@ class YuMiArm(mp.Process):
         return getattr(self._iface.services().sg(), f"{self._side}_{fn_name}")
 
     def _execute_custom(self, routine):
+        self._wait_for_cmd()
         # Upload and execute custom routine (unloading needed for new routine)
         self._iface.services().rapid().run_module_unload(
             self._task, self._custom_mod_path
         )
+        time.sleep(0.01)
         self._wait_for_cmd()
         self._iface.upload_file(self._custom_mod, routine)
         time.sleep(0.01)
+        self._wait_for_cmd()
         self._iface.services().rapid().run_module_load(
             self._task, self._custom_mod_path
         )
+        time.sleep(0.01)
         self._wait_for_cmd()
         self._iface.services().rapid().run_call_by_var(
             self._task, "custom_routine", 0
         )
+        time.sleep(0.01)
         self._wait_for_cmd()
 
     def _wait_for_cmd(self):
@@ -356,29 +361,28 @@ class YuMiArm(mp.Process):
 
 if __name__ == "__main__":
     y = YuMi()
-    y.left.initialize_gripper()
-    y.left.close_gripper()
-    y.left.calibrate_gripper()
-    for _ in range(5):
-        y.left.open_gripper()
-        y.left.close_gripper()
-    import pdb; pdb.set_trace()
+    # y.left.initialize_gripper()
+    # y.left.close_gripper()
+    # # y.left.calibrate_gripper()
+    # for _ in range(5):
+    #     y.left.open_gripper()
+    #     y.left.close_gripper()
+    # time.sleep(10)
 
+    from yumiplanning.yumi_kinematics import YuMiKinematics as YK
 
-    # from yumiplanning.yumi_kinematics import YuMiKinematics as YK
-
-    # L_TCP = RigidTransform(
-    #     translation=[0, 0, 0.11], from_frame="l_tcp", to_frame="wrist"
-    # )
-    # GRIP_DOWN_R = np.diag(
-    #     [1, -1, -1]
-    # )  # orientation where the gripper is facing downwards
-    # y = YuMi(l_tcp=L_TCP)
-    # new_waypoints = []
-    # for w in WAYPOINTS:
-    #     new_waypoints.append(YK.yumi_order_2_urdf(w))
-    # y.left_gripper_close()
-    # y.left.move_joints_traj([np.rad2deg(YK.L_NICE_STATE)])
+    L_TCP = RigidTransform(
+        translation=[0, 0, 0.11], from_frame="l_tcp", to_frame="wrist"
+    )
+    GRIP_DOWN_R = np.diag(
+        [1, -1, -1]
+    )  # orientation where the gripper is facing downwards
+    y = YuMi()
+    new_waypoints = []
+    for w in WAYPOINTS:
+        new_waypoints.append(YK.yumi_order_2_urdf(w))
+    y.left.move_joints_traj([YK.L_NICE_STATE])
+    time.sleep(5)
     # y.left.goto_pose(
     #     RigidTransform(
     #         translation=[0.4, 0.1, 0.1],
@@ -397,7 +401,7 @@ if __name__ == "__main__":
     #     ),
     #     speed=(500, 360),
     # )
-    # y.left.move_joints_traj(np.array(new_waypoints),(500,180,2000,2000))
+    # y.left.move_joints_traj(np.array(new_waypoints[:20]),(500,180,2000,2000))
     """
     p=y.right.read_test_pose(np.zeros(7))
     print(f"zero pos",p)
