@@ -31,7 +31,7 @@ SPEEDDATA_CONSTANTS = [
 ]
 
 ZONEDATA_CONSTANTS = [
-    'fine',
+    "fine",
     "z0",
     "z1",
     "z5",

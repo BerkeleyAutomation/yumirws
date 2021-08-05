@@ -26,109 +26,133 @@ class YuMi(object):
         except RuntimeError:
             print("YuMi could not connect!")
         r_task, l_task = self._iface.rapid_tasks
-        self.lock=mp.Lock()
-        self.left = YuMiArm(self.lock,ip_address, l_task.name, l_tcp)
+        self._lock = mp.Lock()
+        self.left = YuMiArm(self._lock, ip_address, l_task.name, l_tcp)
         self.left.daemon = True
         self.left.start()
-        self.right = YuMiArm(self.lock,ip_address, r_task.name, r_tcp)
+        self.right = YuMiArm(self._lock, ip_address, r_task.name, r_tcp)
         self.right.daemon = True
         self.right.start()
 
     @property
     def auto_mode(self):
-        return self._iface.auto_mode
+        with self._lock:
+            return self._iface.auto_mode
 
     @property
     def connected(self):
-        return self._iface.runtime_info.rws_connected
+        with self._lock:
+            return self._iface.runtime_info.rws_connected
 
     @property
     def motors_on(self):
-        return self._iface.motors_on
+        with self._lock:
+            return self._iface.motors_on
 
     @motors_on.setter
     def motors_on(self, value):
-        self._iface.set_motors_on() if value else self._iface.set_motors_off()
+        with self._lock:
+            self._iface.set_motors_on() if value else self._iface.set_motors_off()
 
     @property
     def rapid_running(self):
-        return self._iface.rapid_running
+        with self._lock:
+            return self._iface.rapid_running
 
     @property
     def rw_version(self):
-        return self._iface.system_info.robot_ware_version
+        with self._lock:
+            return self._iface.system_info.robot_ware_version
 
     @property
     def speed_ratio(self):
-        return self._iface.get_speed_ratio()
+        with self._lock:
+            return self._iface.get_speed_ratio()
 
     @speed_ratio.setter
     def speed_ratio(self, value):
-        self._iface.set_speed_ratio(value)
+        with self._lock:
+            self._iface.set_speed_ratio(value)
 
     @property
     def suction_on(self):
-        return self._iface.get_digital_signal("custom_DO_0")
+        with self._lock:
+            return self._iface.get_digital_signal("custom_DO_0")
 
     @suction_on.setter
     def suction_on(self, value):
-        self._iface.set_digital_signal("custom_DO_0", value)
+        with self._lock:
+            self._iface.set_digital_signal("custom_DO_0", value)
 
     @property
     def system_name(self):
-        return self._iface.system_info.system_name
+        with self._lock:
+            return self._iface.system_info.system_name
 
     @property
     def system_options(self):
-        return self._iface.system_info.system_options
+        with self._lock:
+            return self._iface.system_info.system_options
 
     def get_analog_signal(self, name):
-        return self._iface.get_analog_signal(name)
+        with self._lock:
+            return self._iface.get_analog_signal(name)
 
     def get_digital_signal(self, name):
-        return self._iface.get_digital_signal(name)
+        with self._lock:
+            return self._iface.get_digital_signal(name)
 
     def log_text(self, verbose=False):
-        return self._iface.log_text(verbose)
+        with self._lock:
+            return self._iface.log_text(verbose)
 
     def log_text_latest(self):
-        return self._iface.log_text_latest()
+        with self._lock:
+            return self._iface.log_text_latest()
 
     def set_analog_signal(self, name, value):
-        self._iface.set_analog_signal(name, value)
+        with self._lock:
+            self._iface.set_analog_signal(name, value)
 
     def set_digital_signal(self, name, value):
-        self._iface.set_digital_signal(name, value)
+        with self._lock:
+            self._iface.set_digital_signal(name, value)
 
     def start_rapid(self):
-        self._iface.start_rapid()
+        with self._lock:
+            self._iface.start_rapid()
 
     def stop_rapid(self):
-        self._iface.stop_rapid()
+        with self._lock:
+            self._iface.stop_rapid()
 
     def reset_program_pointer(self):
-        self._iface.reset_program_pointer()
+        with self._lock:
+            self._iface.reset_program_pointer()
 
     def calibrate_grippers(self):
-        self._gripper_fn("calibrate")()
-        time.sleep(2)
+        self._gripper_fn("calibrate")
+        time.sleep(5)
 
-    def move_grippers(self,lpos,rpos):
-        self._gripper_fn("move_to")(lpos*M_TO_MM,rpos*M_TO_MM)
+    def move_grippers(self, lpos, rpos):
+        self._gripper_fn("move_to", lpos * M_TO_MM, rpos * M_TO_MM)
 
     def close_grippers(self):
-        self._gripper_fn("grip_in")()
+        self._gripper_fn("grip_in")
 
     def open_grippers(self):
-        self._gripper_fn("grip_out")()
+        self._gripper_fn("grip_out")
 
-    def _gripper_fn(self, fn_name):
-        return getattr(self._iface.services().sg(), f"dual_{fn_name}")
+    def _gripper_fn(self, fn_name, *args):
+        with self._lock:
+            return getattr(self._iface.services().sg(), f"dual_{fn_name}")(*args)
+
+
 class YuMiArm(mp.Process):
     def __init__(self, lock, ip_address, task, tcp=RigidTransform()):
         super().__init__()
         self._input_queue = mp.Queue()
-        self._q_len = mp.Value('i',0)#we need this to be a reliable counter for the q size
+        self._q_len = mp.Value("i", 0)  # we need this to be a reliable counter for the q size
         self._iface = abb.RWSStateMachineInterface(ip_address)
         self._task = task
         self._tcp = tcp
@@ -142,24 +166,20 @@ class YuMiArm(mp.Process):
         while True:
             try:
                 request = self._input_queue.get(timeout=1)
-                
             except Queue.Empty:
                 continue
-            print(self._side,"executing command:",request[0])
             getattr(self, request[0])(*request[1:])
-            time.sleep(.001)
             self.q_dec()
-            self._wait_for_cmd()
 
     def sync(self):
-        '''
+        """
         blocks until queue is empty and current cmd is done
         queue empty() is not reliable when querying queue items,
         so instead we share a mp.Value which atomically gets updated when adding and
         removing items from the queue
-        '''
-        while self._q_len.value>0:
-            time.sleep(.001)
+        """
+        while self._q_len.value > 0:
+            pass
         self._wait_for_cmd()
 
     def q_add(self):
@@ -173,7 +193,7 @@ class YuMiArm(mp.Process):
     @property
     def tcp(self):
         return self._tcp
-    
+
     @tcp.setter
     def tcp(self, value):
         self._tcp = value
@@ -203,44 +223,27 @@ class YuMiArm(mp.Process):
 
     def calibrate_gripper(self):
         self.q_add()
-        self._input_queue.put(("_calibrate_gripper",))
-        
-    def _calibrate_gripper(self):
-        self._gripper_fn("calibrate")()
+        self._input_queue.put(("_gripper_fn", "calibrate"))
 
     def initialize_gripper(self):
         self.q_add()
-        self._input_queue.put(("_initialize_gripper",))
-
-    def _initialize_gripper(self):
-        self._gripper_fn("initialize")()
+        self._input_queue.put(("_gripper_fn", "initialize"))
 
     def open_gripper(self):
         self.q_add()
-        self._input_queue.put(("_open_gripper",))
-    
-    def _open_gripper(self):
-        with self._lock:
-            self._gripper_fn("grip_out")()
+        self._input_queue.put(("_gripper_fn", "grip_out"))
 
     def close_gripper(self):
         self.q_add()
-        self._input_queue.put(("_close_gripper",))
-    
-    def _close_gripper(self):
-        with self._lock:
-            self._gripper_fn("grip_in")()
+        self._input_queue.put(("_gripper_fn", "grip_in"))
 
     def move_gripper(self, value):
         self.q_add()
-        self._input_queue.put(("_move_gripper", value))
-    
-    def _move_gripper(self, value):
-        with self._lock:
-            self._gripper_fn("move_to")(M_TO_MM * value)
+        self._input_queue.put(("_gripper_fn", "move_to", M_TO_MM * value))
 
     @property
     def gripper_settings(self):
+        self.q_add()
         return self._gripper_fn("get_settings")()
 
     @gripper_settings.setter
@@ -251,9 +254,7 @@ class YuMiArm(mp.Process):
         self.q_add()
         self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
 
-    def _move_joints_traj(
-        self, joints, speed, zone, final_zone
-    ):
+    def _move_joints_traj(self, joints, speed, zone, final_zone):
         """
         Inputs:
             joints : (n, 7)
@@ -263,7 +264,7 @@ class YuMiArm(mp.Process):
                 in array form (m/s, rad/s)
             zone (optional) : str or (7,) or (n, 7)
                 Zone data for each waypoint, either as a string (e.g., "z1")
-                or in array form (finep, pzone_tcp, pzone_ori, pzone_eax, 
+                or in array form (finep, pzone_tcp, pzone_ori, pzone_eax,
                 zone_ori, zone_leax, zone_reax)
             final_zone (optional) : str
                 Zone data for final waypoint
@@ -274,17 +275,13 @@ class YuMiArm(mp.Process):
         elif isinstance(speed, (np.ndarray, list, tuple)):
             speed = np.broadcast_to(speed, (len(joints), 2))
         else:
-            raise ValueError(
-                "Speed must either be a single string or a (2,) or (n,2) iterable"
-            )
+            raise ValueError("Speed must either be a single string or a (2,) or (n,2) iterable")
         if isinstance(zone, str) and zone in ZONEDATA_CONSTANTS:
             zone = np.repeat(zone, len(joints))
         elif isinstance(zone, (np.ndarray, list, tuple)):
             zone = np.broadcast_to(zone, (len(joints), 7))
         else:
-            raise ValueError(
-                "Zone must either be a single string or a (7,) or (n,7) iterable"
-            )
+            raise ValueError("Zone must either be a single string or a (7,) or (n,7) iterable")
 
         # Create RAPID code and execute
         wpstr = ""
@@ -294,11 +291,7 @@ class YuMiArm(mp.Process):
                 abb.RobJoint(np.append(wp[:2], wp[3:])),
                 abb.ExtJoint(eax_a=wp[2]),
             )
-            sd = (
-                sd
-                if isinstance(sd, str)
-                else abb.SpeedData((sd[0] * M_TO_MM, np.rad2deg(sd[1]), 5000, 5000))
-            )
+            sd = sd if isinstance(sd, str) else abb.SpeedData((sd[0] * M_TO_MM, np.rad2deg(sd[1]), 5000, 5000))
             zd = zd if isinstance(zd, str) else abb.ZoneData(zd)
             wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {zd}, curtool;\n"
         jt = abb.JointTarget(
@@ -311,27 +304,11 @@ class YuMiArm(mp.Process):
             else abb.SpeedData((speed[-1][0] * M_TO_MM, np.rad2deg(speed[-1][1]), 5000, 5000))
         )
         wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {final_zone}, curtool;"
-        routine = f"MODULE customModule\n\t{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
+        routine = f"MODULE customModule\n\t{toolstr}\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
-
-    def read_test_pose(self, joints):
-        mod_name = "customModule"
-        jt = abb.JointTarget(
-            abb.RobJoint(np.append(joints[:2], joints[3:])),
-            abb.ExtJoint(eax_a=joints[2]),
-        )
-        wpstr = f"\t\tresPose := CalcRobT({jt}, tool0 \WObj:=wobj0);"
-        routine = f"MODULE customModule\n\tVAR robtarget resPose;\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
-        self._execute_custom(routine)
-        pose = self._iface.get_rapid_symbol_data(
-            self._task, mod_name, "resPose"
-        )
-        return pose
 
     def get_pose(self):
-        rt = self._iface.mechanical_unit_rob_target(
-            self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"
-        )
+        rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
         trans = MM_TO_M * np.array(
             [
                 rt.pos.x.value,
@@ -355,55 +332,42 @@ class YuMiArm(mp.Process):
         )
         return wrist * self._tcp
 
-    def goto_pose(self,pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
+    def goto_pose(self, pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
         self.q_add()
-        self._input_queue.put(("_goto_pose",pose,speed,zone,linear))
-        
+        self._input_queue.put(("_goto_pose", pose, speed, zone, linear))
+
     def _goto_pose(self, pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
-        rt = self._iface.mechanical_unit_rob_target(
-            self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"
-        )
+        rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
         trans = pose.translation * M_TO_MM
         rt.pos = abb.Pos(trans)
         rt.orient = abb.Orient(*pose.quaternion)
         toolstr = f"\n\tPERS tooldata custom_tool := {self.tool_str};\n\tVAR robtarget p1 := {rt};"
-        sd = (
-            speed
-            if isinstance(speed, str)
-            else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
-        )
+        sd = speed if isinstance(speed, str) else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
         cmd = "MoveL" if linear else "MoveJ"
         wpstr = f"\t\t{cmd} p1, {sd}, {zone}, custom_tool;"
         routine = f"MODULE customModule{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
 
-    def _gripper_fn(self, fn_name):
-        return getattr(self._iface.services().sg(), f"{self._side}_{fn_name}")
+    def _gripper_fn(self, fn_name, *args):
+        with self._lock:
+            return getattr(self._iface.services().sg(), f"{self._side}_{fn_name}")(*args)
 
     def _execute_custom(self, routine):
+        # Upload and execute custom routine (unloading needed for new routine)
+        self._iface.services().rapid().run_module_unload(self._task, self._custom_mod_path)
+        time.sleep(0.01)
         self._wait_for_cmd()
         with self._lock:
-            # Upload and execute custom routine (unloading needed for new routine)
-            self._iface.services().rapid().run_module_unload(
-                self._task, self._custom_mod_path
-            )
-            time.sleep(0.01)
-            self._wait_for_cmd()
             self._iface.upload_file(self._custom_mod, routine)
-            time.sleep(0.01)
-            self._wait_for_cmd()
-            self._iface.services().rapid().run_module_load(
-                self._task, self._custom_mod_path
-            )
-            time.sleep(0.01)
-            self._wait_for_cmd()
-            self._iface.services().rapid().run_call_by_var(
-                self._task, "custom_routine", 0
-            )
+        self._iface.services().rapid().run_module_load(self._task, self._custom_mod_path)
+        time.sleep(0.01)
+        self._wait_for_cmd()
+        self._iface.services().rapid().run_call_by_var(self._task, "custom_routine", 0)
         time.sleep(0.01)
         self._wait_for_cmd()
 
     def _wait_for_cmd(self):
-        while (not self._iface.services().main().is_idle(self._task)
-            and not self._iface.services().main().is_stationary(self._task[2:])):
+        while not self._iface.services().main().is_idle(
+            self._task
+        ) and not self._iface.services().main().is_stationary(self._task[2:]):
             pass

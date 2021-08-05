@@ -17,27 +17,29 @@ for w in WAYPOINTS:
 y.left.open_gripper()
 y.right.open_gripper()
 y.left.move_joints_traj(np.array(new_waypoints))
+y.left.move_joints_traj(np.array(new_waypoints[:50]))
 y.right.move_joints_traj(np.array(new_waypoints_r))
+y.right.move_joints_traj(np.array(new_waypoints_r[:50]))
 y.right.close_gripper()
 y.left.close_gripper()
 y.left.sync()
 y.right.sync()
 print("ending")
-    # y.left.goto_pose(
-    #     RigidTransform(
-    #         translation=[0.4, 0.1, 0.1],
-    #         rotation=GRIP_DOWN_R,
-    #         from_frame="l_tcp",
-    #     ),
-    #     zone="fine",
-    #     speed=(100, 360),
-    #     linear=True,
-    # )
-    # y.left.goto_pose(
-    #     RigidTransform(
-    #         translation=[0.4, -0.1, 0.1],
-    #         rotation=GRIP_DOWN_R,
-    #         from_frame="l_tcp",
-    #     ),
-    #     speed=(500, 360),
-    # )
+# y.left.goto_pose(
+#     RigidTransform(
+#         translation=[0.4, 0.1, 0.1],
+#         rotation=GRIP_DOWN_R,
+#         from_frame="l_tcp",
+#     ),
+#     zone="fine",
+#     speed=(100, 360),
+#     linear=True,
+# )
+# y.left.goto_pose(
+#     RigidTransform(
+#         translation=[0.4, -0.1, 0.1],
+#         rotation=GRIP_DOWN_R,
+#         from_frame="l_tcp",
+#     ),
+#     speed=(500, 360),
+# )
