@@ -285,7 +285,7 @@ class YuMiArm(mp.Process):
 
         # Create RAPID code and execute
         wpstr = ""
-        toolstr = f"PERS tooldata curtool := {self.tool_str};"
+        toolstr = f"LOCAL PERS tooldata curtool := {self.tool_str};"
         for wp, sd, zd in zip(joints[:-1], speed[:-1], zone[:-1]):
             jt = abb.JointTarget(
                 abb.RobJoint(np.append(wp[:2], wp[3:])),
@@ -308,7 +308,8 @@ class YuMiArm(mp.Process):
         self._execute_custom(routine)
 
     def get_pose(self):
-        rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
+        with self._lock:
+            rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
         trans = MM_TO_M * np.array(
             [
                 rt.pos.x.value,
@@ -337,11 +338,12 @@ class YuMiArm(mp.Process):
         self._input_queue.put(("_goto_pose", pose, speed, zone, linear))
 
     def _goto_pose(self, pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
-        rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
+        with self._lock:
+            rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
         trans = pose.translation * M_TO_MM
         rt.pos = abb.Pos(trans)
         rt.orient = abb.Orient(*pose.quaternion)
-        toolstr = f"\n\tPERS tooldata custom_tool := {self.tool_str};\n\tVAR robtarget p1 := {rt};"
+        toolstr = f"\n\tLOCAL PERS tooldata custom_tool := {self.tool_str};\n\tVAR robtarget p1 := {rt};"
         sd = speed if isinstance(speed, str) else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
         cmd = "MoveL" if linear else "MoveJ"
         wpstr = f"\t\t{cmd} p1, {sd}, {zone}, custom_tool;"
@@ -354,15 +356,20 @@ class YuMiArm(mp.Process):
 
     def _execute_custom(self, routine):
         # Upload and execute custom routine (unloading needed for new routine)
-        self._iface.services().rapid().run_module_unload(self._task, self._custom_mod_path)
+        with self._lock:
+            self._wait_for_cmd()
+            self._iface.services().rapid().run_module_unload(self._task, self._custom_mod_path)
         time.sleep(0.01)
         self._wait_for_cmd()
         with self._lock:
             self._iface.upload_file(self._custom_mod, routine)
-        self._iface.services().rapid().run_module_load(self._task, self._custom_mod_path)
+        time.sleep(0.01)
+        with self._lock:
+            self._iface.services().rapid().run_module_load(self._task, self._custom_mod_path)
         time.sleep(0.01)
         self._wait_for_cmd()
-        self._iface.services().rapid().run_call_by_var(self._task, "custom_routine", 0)
+        with self._lock:
+            self._iface.services().rapid().run_call_by_var(self._task, "custom_routine", 0)
         time.sleep(0.01)
         self._wait_for_cmd()
 
