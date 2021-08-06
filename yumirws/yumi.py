@@ -13,7 +13,7 @@ from .constants import (
     ZONEDATA_CONSTANTS,
 )
 
-
+SLEEP_TIME=.05
 class YuMi(object):
     def __init__(
         self,
@@ -27,6 +27,9 @@ class YuMi(object):
             print("YuMi could not connect!")
         r_task, l_task = self._iface.rapid_tasks
         self._lock = mp.Lock()
+        self.stop_rapid()
+        self.reset_program_pointer()
+        self.start_rapid()
         self.left = YuMiArm(self._lock, ip_address, l_task.name, l_tcp)
         self.left.daemon = True
         self.left.start()
@@ -119,16 +122,22 @@ class YuMi(object):
             self._iface.set_digital_signal(name, value)
 
     def start_rapid(self):
+        if not self.motors_on:
+                self.motors_on = True
+                time.sleep(.1)
         with self._lock:
             self._iface.start_rapid()
+            time.sleep(0.1)
 
     def stop_rapid(self):
         with self._lock:
             self._iface.stop_rapid()
+            time.sleep(.1)
 
     def reset_program_pointer(self):
         with self._lock:
             self._iface.reset_program_pointer()
+            time.sleep(.1)
 
     def calibrate_grippers(self):
         self._gripper_fn("calibrate")
@@ -161,6 +170,28 @@ class YuMiArm(mp.Process):
         self._custom_mod = abb.FileResource(f"custom_{self._task.lower()}.sys")
         self._custom_mod_path = f"HOME:/{self._custom_mod.filename}"
         self._lock = lock
+        tooltip=\
+f'''
+MODULE {self._task}_tcp
+\tTASK PERS tooldata tool{self._task.lower()} := {self.tool_str};
+ENDMODULE
+'''
+        tooltipmod=abb.FileResource(f"tooltip_{self._task.lower()}.sys")
+        tooltippath=f"HOME:/{tooltipmod.filename}"
+        time.sleep(SLEEP_TIME)
+        with self._lock:
+            self._wait_for_cmd()
+            self._iface.services().rapid().run_module_unload(self._task,tooltippath)
+        time.sleep(SLEEP_TIME)
+        with self._lock:
+            self._wait_for_cmd()
+            self._iface.upload_file(tooltipmod, tooltip)
+        time.sleep(SLEEP_TIME)
+        with self._lock:
+            self._wait_for_cmd()
+            self._iface.services().rapid().run_module_load(self._task, tooltippath)
+        time.sleep(SLEEP_TIME)
+
 
     def run(self):
         while True:
@@ -168,6 +199,7 @@ class YuMiArm(mp.Process):
                 request = self._input_queue.get(timeout=1)
             except Queue.Empty:
                 continue
+            print(self._task,request[0])
             getattr(self, request[0])(*request[1:])
             self.q_dec()
 
@@ -180,7 +212,6 @@ class YuMiArm(mp.Process):
         """
         while self._q_len.value > 0:
             pass
-        self._wait_for_cmd()
 
     def q_add(self):
         with self._q_len.get_lock():
@@ -208,7 +239,8 @@ class YuMiArm(mp.Process):
         return f"[TRUE,[[{','.join(t)}],[{','.join(q)}]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]]"
 
     def get_joints(self):
-        jt = self._iface.mechanical_unit_joint_target(self._task[2:])
+        with self._lock:
+            jt = self._iface.mechanical_unit_joint_target(self._task[2:])
         return np.deg2rad(
             [
                 jt.robax.rax_1.value,
@@ -285,7 +317,6 @@ class YuMiArm(mp.Process):
 
         # Create RAPID code and execute
         wpstr = ""
-        toolstr = f"LOCAL PERS tooldata curtool := {self.tool_str};"
         for wp, sd, zd in zip(joints[:-1], speed[:-1], zone[:-1]):
             jt = abb.JointTarget(
                 abb.RobJoint(np.append(wp[:2], wp[3:])),
@@ -293,7 +324,7 @@ class YuMiArm(mp.Process):
             )
             sd = sd if isinstance(sd, str) else abb.SpeedData((sd[0] * M_TO_MM, np.rad2deg(sd[1]), 5000, 5000))
             zd = zd if isinstance(zd, str) else abb.ZoneData(zd)
-            wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {zd}, curtool;\n"
+            wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {zd}, tool{self._task.lower()};\n"
         jt = abb.JointTarget(
             abb.RobJoint(np.append(joints[-1, :2], joints[-1, 3:])),
             abb.ExtJoint(eax_a=joints[-1, 2]),
@@ -303,12 +334,13 @@ class YuMiArm(mp.Process):
             if isinstance(speed[-1], str)
             else abb.SpeedData((speed[-1][0] * M_TO_MM, np.rad2deg(speed[-1][1]), 5000, 5000))
         )
-        wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {final_zone}, curtool;"
-        routine = f"MODULE customModule\n\t{toolstr}\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
+        wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {final_zone}, tool{self._task.lower()};"
+        routine = f"MODULE customModule\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
 
     def get_pose(self):
         with self._lock:
+            time.sleep(SLEEP_TIME)
             rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
         trans = MM_TO_M * np.array(
             [
@@ -339,42 +371,53 @@ class YuMiArm(mp.Process):
 
     def _goto_pose(self, pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
         with self._lock:
+            time.sleep(SLEEP_TIME)
             rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
         trans = pose.translation * M_TO_MM
         rt.pos = abb.Pos(trans)
         rt.orient = abb.Orient(*pose.quaternion)
-        toolstr = f"\n\tLOCAL PERS tooldata custom_tool := {self.tool_str};\n\tVAR robtarget p1 := {rt};"
+        toolstr = f"\n\tVAR robtarget p1 := {rt};"
         sd = speed if isinstance(speed, str) else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
         cmd = "MoveL" if linear else "MoveJ"
-        wpstr = f"\t\t{cmd} p1, {sd}, {zone}, custom_tool;"
+        wpstr = f"\t\t{cmd} p1, {sd}, {zone}, tool{self._task.lower()};"
         routine = f"MODULE customModule{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
 
     def _gripper_fn(self, fn_name, *args):
         with self._lock:
-            return getattr(self._iface.services().sg(), f"{self._side}_{fn_name}")(*args)
+            res = getattr(self._iface.services().sg(), f"{self._side}_{fn_name}")(*args)
+            time.sleep(SLEEP_TIME)
+            return res
 
     def _execute_custom(self, routine):
         # Upload and execute custom routine (unloading needed for new routine)
+        time.sleep(SLEEP_TIME)
         with self._lock:
             self._wait_for_cmd()
             self._iface.services().rapid().run_module_unload(self._task, self._custom_mod_path)
-        time.sleep(0.01)
-        self._wait_for_cmd()
+        time.sleep(SLEEP_TIME)
         with self._lock:
+            self._wait_for_cmd()
             self._iface.upload_file(self._custom_mod, routine)
-        time.sleep(0.01)
+        time.sleep(SLEEP_TIME)
         with self._lock:
+            self._wait_for_cmd()
             self._iface.services().rapid().run_module_load(self._task, self._custom_mod_path)
-        time.sleep(0.01)
-        self._wait_for_cmd()
+        time.sleep(SLEEP_TIME)
         with self._lock:
+            self._wait_for_cmd()
             self._iface.services().rapid().run_call_by_var(self._task, "custom_routine", 0)
-        time.sleep(0.01)
-        self._wait_for_cmd()
+        time.sleep(SLEEP_TIME)
+        self._wait_for_cmd_lock()
 
     def _wait_for_cmd(self):
-        while not self._iface.services().main().is_idle(
-            self._task
-        ) and not self._iface.services().main().is_stationary(self._task[2:]):
-            pass
+        while True:
+            bad=not self._iface.services().main().is_idle(self._task) or not \
+                    self._iface.services().main().is_stationary(self._task[2:])
+            if not bad:break
+    def _wait_for_cmd_lock(self):
+        while True:
+            with self._lock:
+                bad=not self._iface.services().main().is_idle(self._task) or not \
+                        self._iface.services().main().is_stationary(self._task[2:])
+            if not bad:break
