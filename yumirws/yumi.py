@@ -12,7 +12,9 @@ from .constants import (
     SPEEDDATA_CONSTANTS,
     ZONEDATA_CONSTANTS,
 )
-
+#TODO add sync option for all motions
+#TODO exception handling of motion supervision
+#TODO exception handling of timeout, no message received stuff
 SLEEP_TIME=.05
 class YuMi(object):
     def __init__(
@@ -124,7 +126,7 @@ class YuMi(object):
     def start_rapid(self):
         if not self.motors_on:
                 self.motors_on = True
-                time.sleep(.1)
+                time.sleep(.3)
         with self._lock:
             self._iface.start_rapid()
             time.sleep(0.1)
@@ -156,6 +158,13 @@ class YuMi(object):
         with self._lock:
             return getattr(self._iface.services().sg(), f"dual_{fn_name}")(*args)
 
+    def move_joints_sync(self, l_joints, r_joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
+        if len(l_joints) != len(r_joints):raise Exception("Sync move must have equal joint traj lengths")
+        self.left.q_add()
+        self.right.q_add()
+        self.left._input_queue.put(('_move_joints_sync',l_joints,speed,zone,final_zone))
+        self.right._input_queue.put(('_move_joints_sync',r_joints,speed,zone,final_zone))
+
 
 class YuMiArm(mp.Process):
     def __init__(self, lock, ip_address, task, tcp=RigidTransform()):
@@ -174,6 +183,7 @@ class YuMiArm(mp.Process):
 f'''
 MODULE {self._task}_tcp
 \tTASK PERS tooldata tool{self._task.lower()} := {self.tool_str};
+\tPERS tasks task_list{{2}} := [["T_ROB_L"],["T_ROB_R"]];
 ENDMODULE
 '''
         tooltipmod=abb.FileResource(f"tooltip_{self._task.lower()}.sys")
@@ -212,7 +222,6 @@ ENDMODULE
         """
         while self._q_len.value > 0:
             pass
-
     def q_add(self):
         with self._q_len.get_lock():
             self._q_len.value += 1
@@ -239,8 +248,11 @@ ENDMODULE
         return f"[TRUE,[[{','.join(t)}],[{','.join(q)}]],[0.001,[0,0,0.001],[1,0,0,0],0,0,0]]"
 
     def get_joints(self):
-        with self._lock:
-            jt = self._iface.mechanical_unit_joint_target(self._task[2:])
+        try:
+            with self._lock:
+                jt = self._iface.mechanical_unit_joint_target(self._task[2:])
+        except RuntimeError:
+            return self.get_joints()
         return np.deg2rad(
             [
                 jt.robax.rax_1.value,
@@ -286,6 +298,59 @@ ENDMODULE
         self.q_add()
         self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
 
+    def _move_joints_sync(self, joints, speed, zone, final_zone):
+        """
+        Inputs:
+            joints : (n, 7)
+                NumPy array of joint configurations (in rad)
+            speed (optional) : str or (2,) or (n, 2)
+                Speed for motion either in string form (e.g., "v100") or
+                in array form (m/s, rad/s)
+            zone (optional) : str or (7,) or (n, 7)
+                Zone data for each waypoint, either as a string (e.g., "z1")
+                or in array form (finep, pzone_tcp, pzone_ori, pzone_eax,
+                zone_ori, zone_leax, zone_reax)
+            final_zone (optional) : str
+                Zone data for final waypoint
+        """
+        joints = np.rad2deg(joints)
+        if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
+            speed = np.repeat(speed, len(joints))
+        elif isinstance(speed, (np.ndarray, list, tuple)):
+            speed = np.broadcast_to(speed, (len(joints), 2))
+        else:
+            raise ValueError("Speed must either be a single string or a (2,) or (n,2) iterable")
+        if isinstance(zone, str) and zone in ZONEDATA_CONSTANTS:
+            zone = np.repeat(zone, len(joints))
+        elif isinstance(zone, (np.ndarray, list, tuple)):
+            zone = np.broadcast_to(zone, (len(joints), 7))
+        else:
+            raise ValueError("Zone must either be a single string or a (7,) or (n,7) iterable")
+
+        # Create RAPID code and execute
+        wpstr = "\t\tVAR syncident sync1;\n\t\tVAR syncident sync2;\n\t\tSyncMoveOn sync1, task_list;\n"
+        for wp, sd, zd, id in zip(joints[:-1], speed[:-1], zone[:-1],range(len(joints))):
+            jt = abb.JointTarget(
+                abb.RobJoint(np.append(wp[:2], wp[3:])),
+                abb.ExtJoint(eax_a=wp[2]),
+            )
+            sd = sd if isinstance(sd, str) else abb.SpeedData((sd[0] * M_TO_MM, np.rad2deg(sd[1]), 5000, 5000))
+            zd = zd if isinstance(zd, str) else abb.ZoneData(zd)
+            wpstr += f"\t\tMoveAbsJ {jt}, \ID:={id}, {sd}, {zd}, tool{self._task.lower()};\n"
+        jt = abb.JointTarget(
+            abb.RobJoint(np.append(joints[-1, :2], joints[-1, 3:])),
+            abb.ExtJoint(eax_a=joints[-1, 2]),
+        )
+        sd = (
+            speed[-1]
+            if isinstance(speed[-1], str)
+            else abb.SpeedData((speed[-1][0] * M_TO_MM, np.rad2deg(speed[-1][1]), 5000, 5000))
+        )
+        wpstr += f"\t\tMoveAbsJ {jt}, \ID:={len(joints)}, {sd}, {final_zone}, tool{self._task.lower()};\n"
+        wpstr += f"\t\tSyncMoveOff sync2;"
+        routine = f"MODULE customModule\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
+        self._execute_custom(routine)
+        
     def _move_joints_traj(self, joints, speed, zone, final_zone):
         """
         Inputs:
