@@ -17,13 +17,14 @@ for w in WAYPOINTS:
 y.left.open_gripper()
 y.right.open_gripper()
 y.left.move_joints_traj(np.array(new_waypoints))
-y.left.move_joints_traj(np.array(new_waypoints[:50]))
 y.right.move_joints_traj(np.array(new_waypoints_r))
-y.right.move_joints_traj(np.array(new_waypoints_r[:50]))
 y.right.close_gripper()
 y.left.close_gripper()
 y.left.sync()
 y.right.sync()
+print("After sync")
+if(y.left.clear_error()[0]):print("Error in left")
+if(y.right.clear_error()[0]):print("Error in right")
 print("ending")
 # y.left.goto_pose(
 #     RigidTransform(

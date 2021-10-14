@@ -14,8 +14,21 @@ from .constants import (
 )
 #TODO add sync option for all motions
 #TODO exception handling of motion supervision
-#TODO exception handling of timeout, no message received stuff
 SLEEP_TIME=.05
+
+def cmd(cmd,args,tries=10):
+    '''
+    This function tries to run the command until success for 'tries' number of times.
+    This is useful for RWS commands which occasionally return Timeout
+    '''
+    for i in range(tries):
+        try:
+            return cmd(*args)
+        except RuntimeError:
+            print(f"yumi.py: retrying cmd {cmd}")
+            time.sleep(.03)
+    raise RuntimeError(f"Couldn't execute command {cmd}")
+
 class YuMi(object):
     def __init__(
         self,
@@ -29,9 +42,9 @@ class YuMi(object):
             print("YuMi could not connect!")
         r_task, l_task = self._iface.rapid_tasks
         self._lock = mp.Lock()
-        self.stop_rapid()
-        self.reset_program_pointer()
-        self.start_rapid()
+        cmd(self.stop_rapid,())
+        cmd(self.reset_program_pointer,())
+        cmd(self.start_rapid,())
         self.left = YuMiArm(self._lock, ip_address, l_task.name, l_tcp)
         self.left.daemon = True
         self.left.start()
@@ -184,6 +197,8 @@ f'''
 MODULE {self._task}_tcp
 \tTASK PERS tooldata tool{self._task.lower()} := {self.tool_str};
 \tPERS tasks task_list{{2}} := [["T_ROB_L"],["T_ROB_R"]];
+\tTASK PERS bool pending_move_err := FALSE;
+\tTASK PERS errnum lasterr := 42;
 ENDMODULE
 '''
         tooltipmod=abb.FileResource(f"tooltip_{self._task.lower()}.sys")
@@ -202,14 +217,23 @@ ENDMODULE
             self._iface.services().rapid().run_module_load(self._task, tooltippath)
         time.sleep(SLEEP_TIME)
 
-
+    def err_handler(self,indents):
+        tab=indents*'\t'
+        str=\
+f'''
+{tab}ERROR
+{tab}\tlasterr := ERRNO;
+{tab}\tpending_move_err := TRUE;
+{tab}\tStopMoveReset;
+'''
+        return str
     def run(self):
         while True:
             try:
                 request = self._input_queue.get(timeout=1)
             except Queue.Empty:
                 continue
-            print(self._task,request[0])
+            # print(self._task,request[0])
             getattr(self, request[0])(*request[1:])
             self.q_dec()
 
@@ -264,6 +288,13 @@ ENDMODULE
                 jt.robax.rax_6.value,
             ]
         )
+        
+    def clear_error(self):
+        with self._lock:
+            err    = cmd(self._iface.get_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","pending_move_err"))
+            errnum = cmd(self._iface.get_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","lasterr"))
+            if err=='TRUE':cmd(self._iface.set_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","pending_move_err","FALSE"))
+        return err == 'TRUE',errnum
 
     def calibrate_gripper(self):
         self.q_add()
@@ -401,12 +432,13 @@ ENDMODULE
         )
         wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {final_zone}, tool{self._task.lower()};"
         routine = f"MODULE customModule\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
+        print(routine)
         self._execute_custom(routine)
 
     def get_pose(self):
         with self._lock:
             time.sleep(SLEEP_TIME)
-            rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
+            rt = cmd(self._iface.mechanical_unit_rob_target,(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"))
         trans = MM_TO_M * np.array(
             [
                 rt.pos.x.value,
@@ -477,12 +509,14 @@ ENDMODULE
 
     def _wait_for_cmd(self):
         while True:
-            bad=not self._iface.services().main().is_idle(self._task) or not \
-                    self._iface.services().main().is_stationary(self._task[2:])
+            bad=not cmd(self._iface.services().main().is_idle,(self._task,)) or not \
+                    cmd(self._iface.services().main().is_stationary,(self._task[2:],))
             if not bad:break
+
     def _wait_for_cmd_lock(self):
         while True:
             with self._lock:
-                bad=not self._iface.services().main().is_idle(self._task) or not \
-                        self._iface.services().main().is_stationary(self._task[2:])
+                bad=not cmd(self._iface.services().main().is_idle,(self._task,)) or not \
+                        cmd(self._iface.services().main().is_stationary,(self._task[2:],))
             if not bad:break
+            time.sleep(SLEEP_TIME)
