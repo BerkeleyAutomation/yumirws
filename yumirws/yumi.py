@@ -12,11 +12,28 @@ from .constants import (
     SPEEDDATA_CONSTANTS,
     ZONEDATA_CONSTANTS,
 )
+
+
 #TODO add sync option for all motions
 #TODO exception handling of motion supervision
-#TODO exception handling of timeout, no message received stuff
 SLEEP_TIME=.05
-class YuMi(object):
+
+
+def cmd(cmd,args,tries=10):
+    '''
+    This function tries to run the command until success for 'tries' number of times.
+    This is useful for RWS commands which occasionally return Timeout
+    '''
+    for i in range(tries):
+        try:
+            return cmd(*args)
+        except RuntimeError:
+            print(f"yumi.py: retrying cmd {cmd}")
+            time.sleep(.03)
+    raise RuntimeError(f"Couldn't execute command {cmd}")
+
+
+class YuMi:
     def __init__(
         self,
         l_tcp=RigidTransform(),
@@ -27,14 +44,18 @@ class YuMi(object):
             self._iface = abb.RWSStateMachineInterface(ip_address)
         except RuntimeError:
             print("YuMi could not connect!")
+        
         r_task, l_task = self._iface.rapid_tasks
+
         self._lock = mp.Lock()
-        self.stop_rapid()
-        self.reset_program_pointer()
-        self.start_rapid()
+        cmd(self.stop_rapid,())
+        cmd(self.reset_program_pointer,())
+        cmd(self.start_rapid,())
+
         self.left = YuMiArm(self._lock, ip_address, l_task.name, l_tcp)
         self.left.daemon = True
         self.left.start()
+
         self.right = YuMiArm(self._lock, ip_address, r_task.name, r_tcp)
         self.right.daemon = True
         self.right.start()
@@ -125,8 +146,9 @@ class YuMi(object):
 
     def start_rapid(self):
         if not self.motors_on:
-                self.motors_on = True
-                time.sleep(.3)
+            self.motors_on = True
+            time.sleep(.3)
+        
         with self._lock:
             self._iface.start_rapid()
             time.sleep(0.1)
@@ -159,11 +181,20 @@ class YuMi(object):
             return getattr(self._iface.services().sg(), f"dual_{fn_name}")(*args)
 
     def move_joints_sync(self, l_joints, r_joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
-        if len(l_joints) != len(r_joints):raise Exception("Sync move must have equal joint traj lengths")
+        assert len(l_joints) == len(r_joints), "Sync move must have equal joint traj lengths"
+        
         self.left.q_add()
         self.right.q_add()
-        self.left._input_queue.put(('_move_joints_sync',l_joints,speed,zone,final_zone))
-        self.right._input_queue.put(('_move_joints_sync',r_joints,speed,zone,final_zone))
+        self.left._input_queue.put(('_move_joints_sync', l_joints, speed, zone, final_zone))
+        self.right._input_queue.put(('_move_joints_sync', r_joints, speed, zone, final_zone))
+
+    def move_cartesian_sync(self, left_poses, right_poses, speed=(0.3, 2 * np.pi), zone="z0", final_zone="fine"):
+        assert len(left_poses) == len(right_poses), "Sync move must have equal joint traj lengths"
+
+        self.left.q_add()
+        self.right.q_add()
+        self.left._input_queue.put(('_move_cartesian_sync', left_poses, speed, zone, final_zone))
+        self.right._input_queue.put(('_move_cartesian_sync', right_poses, speed, zone, final_zone))
 
 
 class YuMiArm(mp.Process):
@@ -184,6 +215,8 @@ f'''
 MODULE {self._task}_tcp
 \tTASK PERS tooldata tool{self._task.lower()} := {self.tool_str};
 \tPERS tasks task_list{{2}} := [["T_ROB_L"],["T_ROB_R"]];
+\tTASK PERS bool pending_move_err := FALSE;
+\tTASK PERS errnum lasterr := 42;
 ENDMODULE
 '''
         tooltipmod=abb.FileResource(f"tooltip_{self._task.lower()}.sys")
@@ -202,14 +235,24 @@ ENDMODULE
             self._iface.services().rapid().run_module_load(self._task, tooltippath)
         time.sleep(SLEEP_TIME)
 
-
+    def err_handler(self,indents):
+        tab=indents*'\t'
+        str=\
+f'''
+{tab}ERROR
+{tab}\tlasterr := ERRNO;
+{tab}\tpending_move_err := TRUE;
+{tab}\tStopMoveReset;
+'''
+        return str
+    
     def run(self):
         while True:
             try:
                 request = self._input_queue.get(timeout=1)
             except Queue.Empty:
                 continue
-            print(self._task,request[0])
+
             getattr(self, request[0])(*request[1:])
             self.q_dec()
 
@@ -222,6 +265,7 @@ ENDMODULE
         """
         while self._q_len.value > 0:
             pass
+    
     def q_add(self):
         with self._q_len.get_lock():
             self._q_len.value += 1
@@ -253,6 +297,7 @@ ENDMODULE
                 jt = self._iface.mechanical_unit_joint_target(self._task[2:])
         except RuntimeError:
             return self.get_joints()
+        
         return np.deg2rad(
             [
                 jt.robax.rax_1.value,
@@ -264,6 +309,14 @@ ENDMODULE
                 jt.robax.rax_6.value,
             ]
         )
+        
+    def clear_error(self):
+        with self._lock:
+            err    = cmd(self._iface.get_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","pending_move_err"))
+            errnum = cmd(self._iface.get_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","lasterr"))
+            if err == 'TRUE':
+                cmd(self._iface.set_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","pending_move_err","FALSE"))
+        return err == 'TRUE', errnum
 
     def calibrate_gripper(self):
         self.q_add()
@@ -294,9 +347,21 @@ ENDMODULE
     def gripper_settings(self, value):
         self._gripper_fn("set_settings")(value)
 
-    def move_joints_traj(self, joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
-        self.q_add()
-        self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
+    def _get_rapid_speed(self, speed, number_waypoints):
+        if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
+            return np.repeat(speed, number_waypoints)
+        elif isinstance(speed, (np.ndarray, list, tuple)):
+            return np.broadcast_to(speed, (number_waypoints, 2))
+        else:
+            raise ValueError("Speed must either be a single string or a (2,) or (n,2) iterable")
+
+    def _get_rapid_zone(self, zone, number_waypoints):
+        if isinstance(zone, str) and zone in ZONEDATA_CONSTANTS:
+            return np.repeat(zone, number_waypoints)
+        elif isinstance(zone, (np.ndarray, list, tuple)):
+            return np.broadcast_to(zone, (number_waypoints, 7))
+        else:
+            raise ValueError("Zone must either be a single string or a (7,) or (n,7) iterable")
 
     def _move_joints_sync(self, joints, speed, zone, final_zone):
         """
@@ -314,18 +379,8 @@ ENDMODULE
                 Zone data for final waypoint
         """
         joints = np.rad2deg(joints)
-        if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
-            speed = np.repeat(speed, len(joints))
-        elif isinstance(speed, (np.ndarray, list, tuple)):
-            speed = np.broadcast_to(speed, (len(joints), 2))
-        else:
-            raise ValueError("Speed must either be a single string or a (2,) or (n,2) iterable")
-        if isinstance(zone, str) and zone in ZONEDATA_CONSTANTS:
-            zone = np.repeat(zone, len(joints))
-        elif isinstance(zone, (np.ndarray, list, tuple)):
-            zone = np.broadcast_to(zone, (len(joints), 7))
-        else:
-            raise ValueError("Zone must either be a single string or a (7,) or (n,7) iterable")
+        speed = self._get_rapid_speed(speed, len(joints))
+        zone = self._get_rapid_zone(zone, len(joints))
 
         # Create RAPID code and execute
         wpstr = "\t\tVAR syncident sync1;\n\t\tVAR syncident sync2;\n\t\tSyncMoveOn sync1, task_list;\n"
@@ -350,7 +405,11 @@ ENDMODULE
         wpstr += f"\t\tSyncMoveOff sync2;"
         routine = f"MODULE customModule\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
-        
+
+    def move_joints_traj(self, joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
+        self.q_add()
+        self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
+
     def _move_joints_traj(self, joints, speed, zone, final_zone):
         """
         Inputs:
@@ -367,18 +426,8 @@ ENDMODULE
                 Zone data for final waypoint
         """
         joints = np.rad2deg(joints)
-        if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
-            speed = np.repeat(speed, len(joints))
-        elif isinstance(speed, (np.ndarray, list, tuple)):
-            speed = np.broadcast_to(speed, (len(joints), 2))
-        else:
-            raise ValueError("Speed must either be a single string or a (2,) or (n,2) iterable")
-        if isinstance(zone, str) and zone in ZONEDATA_CONSTANTS:
-            zone = np.repeat(zone, len(joints))
-        elif isinstance(zone, (np.ndarray, list, tuple)):
-            zone = np.broadcast_to(zone, (len(joints), 7))
-        else:
-            raise ValueError("Zone must either be a single string or a (7,) or (n,7) iterable")
+        speed = self._get_rapid_speed(speed, len(joints))
+        zone = self._get_rapid_zone(zone, len(joints))
 
         # Create RAPID code and execute
         wpstr = ""
@@ -390,6 +439,7 @@ ENDMODULE
             sd = sd if isinstance(sd, str) else abb.SpeedData((sd[0] * M_TO_MM, np.rad2deg(sd[1]), 5000, 5000))
             zd = zd if isinstance(zd, str) else abb.ZoneData(zd)
             wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {zd}, tool{self._task.lower()};\n"
+        
         jt = abb.JointTarget(
             abb.RobJoint(np.append(joints[-1, :2], joints[-1, 3:])),
             abb.ExtJoint(eax_a=joints[-1, 2]),
@@ -406,22 +456,19 @@ ENDMODULE
     def get_pose(self):
         with self._lock:
             time.sleep(SLEEP_TIME)
-            rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
-        trans = MM_TO_M * np.array(
-            [
-                rt.pos.x.value,
-                rt.pos.y.value,
-                rt.pos.z.value,
-            ]
-        )
-        q = np.array(
-            [
-                rt.orient.q1.value,
-                rt.orient.q2.value,
-                rt.orient.q3.value,
-                rt.orient.q4.value,
-            ]
-        )
+            rt = cmd(self._iface.mechanical_unit_rob_target,(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"))
+        
+        trans = MM_TO_M * np.array([
+            rt.pos.x.value,
+            rt.pos.y.value,
+            rt.pos.z.value,
+        ])
+        q = np.array([
+            rt.orient.q1.value,
+            rt.orient.q2.value,
+            rt.orient.q3.value,
+            rt.orient.q4.value,
+        ])
         wrist = RigidTransform(
             translation=trans,
             rotation=RigidTransform.rotation_from_quaternion(q),
@@ -435,16 +482,55 @@ ENDMODULE
         self._input_queue.put(("_goto_pose", pose, speed, zone, linear))
 
     def _goto_pose(self, pose, speed=(0.3, 2 * np.pi), zone="fine", linear=True):
-        with self._lock:
-            time.sleep(SLEEP_TIME)
-            rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
-        trans = pose.translation * M_TO_MM
-        rt.pos = abb.Pos(trans)
-        rt.orient = abb.Orient(*pose.quaternion)
-        toolstr = f"\n\tVAR robtarget p1 := {rt};"
+        toolstr = f"\n\tVAR robtarget p1 := {self._get_rapid_pose(pose)};"
         sd = speed if isinstance(speed, str) else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
         cmd = "MoveL" if linear else "MoveJ"
         wpstr = f"\t\t{cmd} p1, {sd}, {zone}, tool{self._task.lower()};"
+        routine = f"MODULE customModule{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
+        self._execute_custom(routine)
+
+    def _get_rapid_pose(self, pose):
+        with self._lock:
+            time.sleep(SLEEP_TIME)
+            rt = self._iface.mechanical_unit_rob_target(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0")
+        
+        trans = pose.translation * M_TO_MM
+        rt.pos = abb.Pos(trans)
+        rt.orient = abb.Orient(*pose.quaternion)
+        return f"{rt}"
+
+    def move_cartesian_traj(self, poses, speed=(0.3, 2 * np.pi), zone='z0', final_zone='fine'):
+        self.q_add()
+        self._input_queue.put(("_move_cartesian_traj", poses, speed, zone, final_zone))
+
+    def _move_cartesian_traj(self, poses, speed, zone, final_zone):
+        toolstr = ''
+        for i, p in enumerate(poses):
+            toolstr += f'\n\tVAR robtarget p{i} := {self._get_rapid_pose(p)};'
+
+        sd = speed if isinstance(speed, str) else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
+
+        wpstr = ''
+        for i, p in enumerate(poses):
+            is_last = (i == len(poses) - 1)
+            wpstr += f'\n\t\tMoveL p{i}, {sd}, {zone if not is_last else final_zone}, tool{self._task.lower()};'
+        
+        routine = f'MODULE customModule{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE'
+        self._execute_custom(routine)
+
+    def _move_cartesian_sync(self, poses, speed, zone, final_zone):
+        toolstr = ''
+        for i, p in enumerate(poses):
+            toolstr += f'\n\tVAR robtarget p{i} := {self._get_rapid_pose(p)};'
+
+        sd = speed if isinstance(speed, str) else abb.SpeedData((speed[0] * M_TO_MM, np.rad2deg(speed[1]), 5000, 5000))
+        
+        wpstr = "\t\tVAR syncident sync1;\n\t\tVAR syncident sync2;\n\t\tSyncMoveOn sync1, task_list;\n"
+        for i, p in enumerate(poses):
+            is_last = (i == len(poses) - 1)
+            wpstr += f'\n\t\tMoveL p{i}, \ID:={i}, {sd}, {zone if not is_last else final_zone}, tool{self._task.lower()};'
+
+        wpstr += f"\t\tSyncMoveOff sync2;"
         routine = f"MODULE customModule{toolstr}\n\tPROC custom_routine0()\n{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
 
@@ -477,12 +563,14 @@ ENDMODULE
 
     def _wait_for_cmd(self):
         while True:
-            bad=not self._iface.services().main().is_idle(self._task) or not \
-                    self._iface.services().main().is_stationary(self._task[2:])
+            bad=not cmd(self._iface.services().main().is_idle,(self._task,)) or not \
+                    cmd(self._iface.services().main().is_stationary,(self._task[2:],))
             if not bad:break
+
     def _wait_for_cmd_lock(self):
         while True:
             with self._lock:
-                bad=not self._iface.services().main().is_idle(self._task) or not \
-                        self._iface.services().main().is_stationary(self._task[2:])
+                bad=not cmd(self._iface.services().main().is_idle,(self._task,)) or not \
+                        cmd(self._iface.services().main().is_stationary,(self._task[2:],))
             if not bad:break
+            time.sleep(SLEEP_TIME)
