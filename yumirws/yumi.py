@@ -256,15 +256,17 @@ f'''
             getattr(self, request[0])(*request[1:])
             self.q_dec()
 
-    def sync(self):
+    def sync(self, timeout=float('inf')):
         """
         blocks until queue is empty and current cmd is done
         queue empty() is not reliable when querying queue items,
         so instead we share a mp.Value which atomically gets updated when adding and
         removing items from the queue
         """
-        while self._q_len.value > 0:
+        start = time.time()
+        while self._q_len.value > 0 and (time.time() - start < timeout):
             pass
+        return time.time() - start > timeout
     
     def q_add(self):
         with self._q_len.get_lock():
