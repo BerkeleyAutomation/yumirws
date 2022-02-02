@@ -1,0 +1,3 @@
+[submodule "extern/abb_librws"]
+	path = extern/abb_librws
+	url = ../../mjd3/abb_librws.git
