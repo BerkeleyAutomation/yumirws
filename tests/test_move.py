@@ -23,8 +23,10 @@ y.left.close_gripper()
 y.left.sync()
 y.right.sync()
 print("After sync")
-if(y.left.clear_error()[0]):print("Error in left")
-if(y.right.clear_error()[0]):print("Error in right")
+if y.left.clear_error()[0]:
+    print("Error in left")
+if y.right.clear_error()[0]:
+    print("Error in right")
 print("ending")
 # y.left.goto_pose(
 #     RigidTransform(

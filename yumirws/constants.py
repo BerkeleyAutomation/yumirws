@@ -1,5 +1,6 @@
 MM_TO_M = 1.0 / 1000.0
 M_TO_MM = 1000.0
+SLEEP_TIME = 0.05
 
 SPEEDDATA_CONSTANTS = [
     "v5",

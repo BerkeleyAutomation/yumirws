@@ -1,3 +1,4 @@
+import json
 import multiprocessing as mp
 import numpy as np
 import queue as Queue
@@ -11,23 +12,26 @@ from .constants import (
     MM_TO_M,
     SPEEDDATA_CONSTANTS,
     ZONEDATA_CONSTANTS,
+    SLEEP_TIME,
 )
-#TODO add sync option for all motions
-#TODO exception handling of motion supervision
-SLEEP_TIME=.05
 
-def cmd(cmd,args,tries=10):
-    '''
+# TODO add sync option for all motions
+# TODO exception handling of motion supervision
+
+
+def cmd(cmd, args, tries=10):
+    """
     This function tries to run the command until success for 'tries' number of times.
     This is useful for RWS commands which occasionally return Timeout
-    '''
+    """
     for i in range(tries):
         try:
             return cmd(*args)
         except RuntimeError:
             print(f"yumi.py: retrying cmd {cmd}")
-            time.sleep(.03)
+            time.sleep(0.03)
     raise RuntimeError(f"Couldn't execute command {cmd}")
+
 
 class YuMi(object):
     def __init__(
@@ -42,9 +46,9 @@ class YuMi(object):
             print("YuMi could not connect!")
         r_task, l_task = self._iface.rapid_tasks
         self._lock = mp.Lock()
-        cmd(self.stop_rapid,())
-        cmd(self.reset_program_pointer,())
-        cmd(self.start_rapid,())
+        cmd(self.stop_rapid, ())
+        cmd(self.reset_program_pointer, ())
+        cmd(self.start_rapid, ())
         self.left = YuMiArm(self._lock, ip_address, l_task.name, l_tcp)
         self.left.daemon = True
         self.left.start()
@@ -138,8 +142,8 @@ class YuMi(object):
 
     def start_rapid(self):
         if not self.motors_on:
-                self.motors_on = True
-                time.sleep(.3)
+            self.motors_on = True
+            time.sleep(0.3)
         with self._lock:
             self._iface.start_rapid()
             time.sleep(0.1)
@@ -147,12 +151,12 @@ class YuMi(object):
     def stop_rapid(self):
         with self._lock:
             self._iface.stop_rapid()
-            time.sleep(.1)
+            time.sleep(0.1)
 
     def reset_program_pointer(self):
         with self._lock:
             self._iface.reset_program_pointer()
-            time.sleep(.1)
+            time.sleep(0.1)
 
     def calibrate_grippers(self):
         self._gripper_fn("calibrate")
@@ -172,11 +176,12 @@ class YuMi(object):
             return getattr(self._iface.services().sg(), f"dual_{fn_name}")(*args)
 
     def move_joints_sync(self, l_joints, r_joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
-        if len(l_joints) != len(r_joints):raise Exception("Sync move must have equal joint traj lengths")
+        if len(l_joints) != len(r_joints):
+            raise Exception("Sync move must have equal joint traj lengths")
         self.left.q_add()
         self.right.q_add()
-        self.left._input_queue.put(('_move_joints_sync',l_joints,speed,zone,final_zone))
-        self.right._input_queue.put(('_move_joints_sync',r_joints,speed,zone,final_zone))
+        self.left._input_queue.put(("_move_joints_sync", l_joints, speed, zone, final_zone))
+        self.right._input_queue.put(("_move_joints_sync", r_joints, speed, zone, final_zone))
 
 
 class YuMiArm(mp.Process):
@@ -192,21 +197,20 @@ class YuMiArm(mp.Process):
         self._custom_mod = abb.FileResource(f"custom_{self._task.lower()}.sys")
         self._custom_mod_path = f"HOME:/{self._custom_mod.filename}"
         self._lock = lock
-        tooltip=\
-f'''
+        tooltip = f"""
 MODULE {self._task}_tcp
 \tTASK PERS tooldata tool{self._task.lower()} := {self.tool_str};
 \tPERS tasks task_list{{2}} := [["T_ROB_L"],["T_ROB_R"]];
 \tTASK PERS bool pending_move_err := FALSE;
 \tTASK PERS errnum lasterr := 42;
 ENDMODULE
-'''
-        tooltipmod=abb.FileResource(f"tooltip_{self._task.lower()}.sys")
-        tooltippath=f"HOME:/{tooltipmod.filename}"
+"""
+        tooltipmod = abb.FileResource(f"tooltip_{self._task.lower()}.sys")
+        tooltippath = f"HOME:/{tooltipmod.filename}"
         time.sleep(SLEEP_TIME)
         with self._lock:
             self._wait_for_cmd()
-            self._iface.services().rapid().run_module_unload(self._task,tooltippath)
+            self._iface.services().rapid().run_module_unload(self._task, tooltippath)
         time.sleep(SLEEP_TIME)
         with self._lock:
             self._wait_for_cmd()
@@ -217,16 +221,16 @@ ENDMODULE
             self._iface.services().rapid().run_module_load(self._task, tooltippath)
         time.sleep(SLEEP_TIME)
 
-    def err_handler(self,indents):
-        tab=indents*'\t'
-        str=\
-f'''
+    def err_handler(self, indents):
+        tab = indents * "\t"
+        str = f"""
 {tab}ERROR
 {tab}\tlasterr := ERRNO;
 {tab}\tpending_move_err := TRUE;
 {tab}\tStopMoveReset;
-'''
+"""
         return str
+
     def run(self):
         while True:
             try:
@@ -246,6 +250,7 @@ f'''
         """
         while self._q_len.value > 0:
             pass
+
     def q_add(self):
         with self._q_len.get_lock():
             self._q_len.value += 1
@@ -288,13 +293,17 @@ f'''
                 jt.robax.rax_6.value,
             ]
         )
-        
+
     def clear_error(self):
         with self._lock:
-            err    = cmd(self._iface.get_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","pending_move_err"))
-            errnum = cmd(self._iface.get_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","lasterr"))
-            if err=='TRUE':cmd(self._iface.set_rapid_symbol_data,(self._task,f"{self._task.lower()}_tcp","pending_move_err","FALSE"))
-        return err == 'TRUE',errnum
+            err = cmd(self._iface.get_rapid_symbol_data, (self._task, f"{self._task.lower()}_tcp", "pending_move_err"))
+            errnum = cmd(self._iface.get_rapid_symbol_data, (self._task, f"{self._task.lower()}_tcp", "lasterr"))
+            if err == "TRUE":
+                cmd(
+                    self._iface.set_rapid_symbol_data,
+                    (self._task, f"{self._task.lower()}_tcp", "pending_move_err", "FALSE"),
+                )
+        return err == "TRUE", errnum
 
     def calibrate_gripper(self):
         self.q_add()
@@ -325,6 +334,49 @@ f'''
     def gripper_settings(self, value):
         self._gripper_fn("set_settings")(value)
 
+    def get_fk(self, joints):
+        self.sync()
+        if joints.ndim == 1:
+            joints = joints.reshape(1, -1)
+        joints_deg = np.rad2deg(joints)
+
+        varstr = ""
+        calcstr = ""
+        for i, jts_deg in enumerate(joints_deg):
+            varstr += f"\tVAR robtarget outrt{i};\n"
+            jt = abb.JointTarget(
+                abb.RobJoint(np.append(jts_deg[:2], jts_deg[3:])),
+                abb.ExtJoint(eax_a=jts_deg[2]),
+            )
+            calcstr += f"\t\toutrt{i}:=CalcRobT({jt}, tool{self._task.lower()});\n"
+        routine = "MODULE customModule\n" f"{varstr}\tPROC custom_routine0()\n" f"{calcstr}\n\tENDPROC\nENDMODULE"
+        self._execute_custom(routine)
+
+        rts = []
+        for i in range(len(joints_deg)):
+            ret = json.loads(self._iface.get_rapid_symbol_data(self._task, "customModule", f"outrt{i}"))
+            rts.append(abb.RobTarget(abb.Pos(ret[0]), abb.Orient(ret[1]), abb.ConfData(ret[2]), abb.ExtJoint(ret[3])))
+        return rts if len(rts) > 1 else rts[0]
+
+    def get_ik(self, rts):
+        self.sync()
+        varstr = ""
+        calcstr = ""
+        for i, rt in enumerate(rts):
+            varstr += f"\tVAR jointtarget outjt{i};\n"
+            calcstr += f"\t\toutjt{i}:=CalcJointT({rt}, tool{self._task.lower()});\n"
+        routine = "MODULE customModule\n" f"{varstr}\tPROC custom_routine0()\n" f"{calcstr}\n\tENDPROC\nENDMODULE"
+        self._execute_custom(routine)
+
+        jts = np.zeros((len(rts), 7))
+        for i in range(len(rts)):
+            try:
+                ret = json.loads(self._iface.get_rapid_symbol_data(self._task, "customModule", f"outjt{i}"))
+                jts[i] = np.deg2rad(ret[0][:2] + ret[1][:1] + ret[0][2:])
+            except RuntimeError:
+                pass
+        return jts if len(jts) > 1 else jts[0]
+
     def move_joints_traj(self, joints, speed=(0.3, 2 * np.pi), zone="z1", final_zone="fine"):
         self.q_add()
         self._input_queue.put(("_move_joints_traj", joints, speed, zone, final_zone))
@@ -344,6 +396,8 @@ f'''
             final_zone (optional) : str
                 Zone data for final waypoint
         """
+        if joints.ndim == 1:
+            joints = joints.reshape(1, -1)
         joints = np.rad2deg(joints)
         if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
             speed = np.repeat(speed, len(joints))
@@ -360,7 +414,7 @@ f'''
 
         # Create RAPID code and execute
         wpstr = "\t\tVAR syncident sync1;\n\t\tVAR syncident sync2;\n\t\tSyncMoveOn sync1, task_list;\n"
-        for wp, sd, zd, id in zip(joints[:-1], speed[:-1], zone[:-1],range(len(joints))):
+        for wp, sd, zd, id in zip(joints[:-1], speed[:-1], zone[:-1], range(len(joints))):
             jt = abb.JointTarget(
                 abb.RobJoint(np.append(wp[:2], wp[3:])),
                 abb.ExtJoint(eax_a=wp[2]),
@@ -381,7 +435,7 @@ f'''
         wpstr += f"\t\tSyncMoveOff sync2;"
         routine = f"MODULE customModule\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
         self._execute_custom(routine)
-        
+
     def _move_joints_traj(self, joints, speed, zone, final_zone):
         """
         Inputs:
@@ -397,6 +451,8 @@ f'''
             final_zone (optional) : str
                 Zone data for final waypoint
         """
+        if joints.ndim == 1:
+            joints = joints.reshape(1, -1)
         joints = np.rad2deg(joints)
         if isinstance(speed, str) and speed in SPEEDDATA_CONSTANTS:
             speed = np.repeat(speed, len(joints))
@@ -432,13 +488,12 @@ f'''
         )
         wpstr += f"\t\tMoveAbsJ {jt}, {sd}, {final_zone}, tool{self._task.lower()};"
         routine = f"MODULE customModule\n" "\tPROC custom_routine0()\n" f"{wpstr}\n\tENDPROC\nENDMODULE"
-        print(routine)
         self._execute_custom(routine)
 
     def get_pose(self):
         with self._lock:
             time.sleep(SLEEP_TIME)
-            rt = cmd(self._iface.mechanical_unit_rob_target,(self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"))
+            rt = cmd(self._iface.mechanical_unit_rob_target, (self._task[2:], abb.Coordinate.BASE, "tool0", "wobj0"))
         trans = MM_TO_M * np.array(
             [
                 rt.pos.x.value,
@@ -509,14 +564,18 @@ f'''
 
     def _wait_for_cmd(self):
         while True:
-            bad=not cmd(self._iface.services().main().is_idle,(self._task,)) or not \
-                    cmd(self._iface.services().main().is_stationary,(self._task[2:],))
-            if not bad:break
+            bad = not cmd(self._iface.services().main().is_idle, (self._task,)) or not cmd(
+                self._iface.services().main().is_stationary, (self._task[2:],)
+            )
+            if not bad:
+                break
 
     def _wait_for_cmd_lock(self):
         while True:
             with self._lock:
-                bad=not cmd(self._iface.services().main().is_idle,(self._task,)) or not \
-                        cmd(self._iface.services().main().is_stationary,(self._task[2:],))
-            if not bad:break
+                bad = not cmd(self._iface.services().main().is_idle, (self._task,)) or not cmd(
+                    self._iface.services().main().is_stationary, (self._task[2:],)
+                )
+            if not bad:
+                break
             time.sleep(SLEEP_TIME)
