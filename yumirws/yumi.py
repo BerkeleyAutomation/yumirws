@@ -331,7 +331,7 @@ ENDMODULE
 
     @gripper_settings.setter
     def gripper_settings(self, value):
-        self._gripper_fn("set_settings")(value)
+        self._gripper_fn("set_settings", value)
 
     def get_fk(self, joints):
         self.sync()
