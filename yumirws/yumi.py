@@ -327,8 +327,7 @@ ENDMODULE
 
     @property
     def gripper_settings(self):
-        self.q_add()
-        return self._gripper_fn("get_settings")()
+        return self._gripper_fn("get_settings")
 
     @gripper_settings.setter
     def gripper_settings(self, value):
